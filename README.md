@@ -66,6 +66,6 @@ This example will build:
 
 - hellocloud: An Spring Boot project dockerized that will be deployed using AWS Fargate
 
-- lambda-ecr.py: The lambda function that will listen the ECR events and launch a new task
+- lambda-ecr.py: The lambda function that listens ECR events and launch a new task
 
 - push-image2ecr.sh: An script that creates the docker image of the target jar and push it to ECR (requires two parameters cli profile and ECR repository)
