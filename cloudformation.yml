@@ -1,0 +1,312 @@
+Parameters:
+  vpcId:
+    Type: String
+    Description: 'VPC Id'
+  elbSubnet1Id:
+    Type: String
+    Description: 'First Subnet associated with the Load Balancer'
+  elbSubnet2Id:
+    Type: String
+    Description: 'Second Subnet associated with the Load Balancer'
+  containerSubnet1Id:
+    Type: String
+    Description: 'Private Subnet 1 associated with the containers'
+  containerSubnet2Id:
+    Type: String
+    Description: 'Private Subnet 2 associated with the containers'
+  containerImage:
+    Type: String
+    Description: 'Image Repository, for example xxxxxxxxxxxx.dkr.ecr.eu-central-1.amazonaws.com/hellocloud'
+  lambdaS3Bucket:
+    Type: String
+    Description: 'S3 Bucket where the lambda function is stored'
+  lambdaS3Key:
+    Type: String
+    Description: 'S3 key to the lambda function'
+  repositoryName:
+    Type: String
+    Description: 'ECR Repository Name that contains the image'
+  prefix:
+    Type: String
+    Description: 'Prefix for the resources to be unique'
+    Default: 'ecr-icd'
+
+Resources:
+  CloudwatchLogsGroupContainers:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:  !Join ['-', [!Ref prefix, 'logs-containers']]
+      RetentionInDays: 14
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName:  !Join ['-', [!Ref prefix, 'sg-alb']]
+      GroupDescription: Application Load Balancer security group
+      VpcId: !Ref vpcId
+      SecurityGroupIngress:
+        - Description: Allow access to the ELB on port 80
+          IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+  
+  ECSALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: 'internet-facing'
+      Name: !Join ['-', [!Ref prefix, 'alb-external' ]]
+      Subnets: 
+        - !Ref elbSubnet1Id
+        - !Ref elbSubnet2Id
+      SecurityGroups: 
+        - !Ref ALBSecurityGroup
+  
+  ALBTGEmpty:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: [ ECSALB ]
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref vpcId
+      Tags:
+      - Key: Name
+        Value: !Join ['-', [!Ref prefix, 'tg-empty' ]]
+  
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: [ ECSALB, ALBTGEmpty ]
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref ALBTGEmpty
+      LoadBalancerArn: !Ref ECSALB
+      Port: '80'
+      Protocol: HTTP
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+  
+  ECSTaskDefinitionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref prefix, 'ecs-td-role' ]]
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: !Join ['-', [!Ref prefix, 'ecs-td-policy' ]]
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: 
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+
+  HelloCloudTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: [ ECSCluster ]
+    Properties:
+      RequiresCompatibilities:
+        - "FARGATE"      
+      Cpu: 256
+      Memory: 512
+      Family: "hellocloud-td"
+      NetworkMode: "awsvpc"
+      ExecutionRoleArn: !Ref ECSTaskDefinitionRole
+      ContainerDefinitions:
+        - Name: "HelloCloud"
+          Image: !Ref containerImage
+          PortMappings:
+            - ContainerPort: 8080
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Join ['-', [!Ref prefix, 'logs-containers' ]]
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'container'
+      Tags:
+        - Key: "Name"
+          Value: "HelloCloudTaskDefinition"
+
+  ServiceSG:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: [ ALBSecurityGroup ]
+    Properties:
+      GroupName:  !Join ['-', [!Ref prefix, 'service-sg']]
+      GroupDescription: Service Security Group to allow Load Balancer Access
+      VpcId: !Ref vpcId
+      SecurityGroupIngress:
+        - Description: Allow access to the ELB on port 8080
+          IpProtocol: tcp
+          FromPort: '8080'
+          ToPort: '8080'
+          SourceSecurityGroupId: !Ref ALBSecurityGroup       
+
+  HelloCloudALBTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: [ ECSALB ]
+    Properties:
+      TargetType: 'ip'
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: '/hellocloud/actuator/health'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: 'tg-hellocloud'
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref 'vpcId'
+      Tags:
+      - Key: Name
+        Value: 'alb-tg-hellocloud'
+  
+  HelloCloudALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: [ ECSALB, ALBListenerHTTP, HelloCloudALBTG ]
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref HelloCloudALBTG
+      Conditions:
+      - Field: path-pattern
+        Values: 
+          - '/hellocloud/*'
+      ListenerArn: !Ref ALBListenerHTTP
+      Priority: 1
+
+  HelloCloudService:
+    Type: AWS::ECS::Service
+    DependsOn: [ ECSCluster, ECSALB, HelloCloudALBTG, HelloCloudALBListenerRule ]
+    Properties:
+      ServiceName: !Join ['-', [!Ref repositoryName, 'service' ]]
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      TaskDefinition: !Ref HelloCloudTaskDefinition
+      HealthCheckGracePeriodSeconds: 180
+      LoadBalancers:
+        - ContainerName: "HelloCloud"
+          ContainerPort: 8080
+          TargetGroupArn: !Ref HelloCloudALBTG
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ServiceSG 
+          Subnets:
+            - !Ref containerSubnet1Id
+            - !Ref containerSubnet2Id
+  
+  LambdaECRRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref prefix, 'lambda-ecr-role']]
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: !Join ['-', [!Ref prefix, 'lambda-ecr-policy']]
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: 
+              - 'ecs:UpdateService'
+              - 'ecs:ListServices'
+              - 'ecs:RunTask'
+              - 'ecs:StartTask'
+            Resource:  '*' 
+          - Effect: Allow
+            Action:
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:DescribeNetworkInterfaces'
+              - 'ec2:DeleteNetworkInterface'
+            Resource:  '*' 
+          - Effect: Allow
+            Action: 
+                - 'logs:CreateLogGroup'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:DescribeLogStreams'
+            Resource: 'arn:aws:logs:*:*:*'
+          - Effect: Allow
+            Action: 
+                - 'ssm:DescribeParameters'
+                - 'ssm:GetParameters'
+            Resource:  'arn:aws:ssm:*:*:*'   
+
+  LambdaECR:
+    Type: "AWS::Lambda::Function"
+    DependsOn: [ LambdaECRRole, ECSCluster ]
+    Properties:
+      FunctionName: !Join ['-', [!Ref prefix, 'lambda-ecr']]
+      Description: 'Start a new task when the ecr image changes'
+      Handler: "lambda_ecr.lambda_handler"
+      Role: !GetAtt LambdaECRRole.Arn
+      Code:
+        S3Bucket: !Ref lambdaS3Bucket
+        S3Key: !Ref lambdaS3Key
+      Runtime: "python2.7"
+      Timeout: 300
+      MemorySize: 128
+      ReservedConcurrentExecutions: 1
+      VpcConfig:
+        SecurityGroupIds: 
+          - !Ref ServiceSG
+        SubnetIds: 
+          - !Ref containerSubnet1Id
+          - !Ref containerSubnet2Id
+      Environment:
+        Variables:
+          ECS_CLUSTER_NAME: !Ref ECSCluster
+  
+  CloudWatchECRRule:
+    Type: "AWS::Events::Rule"
+    DependsOn: [ LambdaECR ]
+    Properties:
+      Name: !Join ['-', [!Ref prefix, 'ecr-rule-event']]
+      Description: "ECR Rule that is fired when there is an ECR event"
+      EventPattern: '{"source": ["aws.ecr"]}'
+      Targets: 
+        - Id: !Join ['-', [!Ref prefix, 'lambda-ecr-id']]
+          Arn: !GetAtt LambdaECR.Arn
+  
+  LambdaECREventPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: [ LambdaECR, CloudWatchECRRule ]
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaECR.Arn
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt CloudWatchECRRule.Arn
+
+Outputs:
+  ALBPublicDNSName:
+    Value: !GetAtt ECSALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-alb-dns"
+
+  ServiceName:
+    Description: Service name
+    Value: !GetAtt HelloCloudService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-service-name"
