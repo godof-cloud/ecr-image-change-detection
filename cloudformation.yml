@@ -1,28 +1,13 @@
 Parameters:
   vpcId:
-    Type: String
+    Type: AWS::EC2::VPC::Id
     Description: 'VPC Id'
-  elbSubnet1Id:
-    Type: String
-    Description: 'First Subnet associated with the Load Balancer'
-  elbSubnet2Id:
-    Type: String
-    Description: 'Second Subnet associated with the Load Balancer'
-  containerSubnet1Id:
-    Type: String
-    Description: 'Private Subnet 1 associated with the containers'
-  containerSubnet2Id:
-    Type: String
-    Description: 'Private Subnet 2 associated with the containers'
-  containerImage:
-    Type: String
-    Description: 'Image Repository, for example xxxxxxxxxxxx.dkr.ecr.eu-central-1.amazonaws.com/hellocloud'
-  lambdaS3Bucket:
-    Type: String
-    Description: 'S3 Bucket where the lambda function is stored'
-  lambdaS3Key:
-    Type: String
-    Description: 'S3 key to the lambda function'
+  elbSubnetsId:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'Subnets associated with the Load Balancer'
+  containerSubnetsId:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'Private Subnets associated with the container'
   repositoryName:
     Type: String
     Description: 'ECR Repository Name that contains the image'
@@ -32,10 +17,10 @@ Parameters:
     Default: 'ecr-icd'
 
 Resources:
-  CloudwatchLogsGroupContainers:
+  ECSLogs:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName:  !Join ['-', [!Ref prefix, 'logs-containers']]
+      LogGroupName: !Join ['-', [!Ref prefix, 'container-logs' ]]
       RetentionInDays: 14
 
   ALBSecurityGroup:
@@ -51,14 +36,26 @@ Resources:
           ToPort: '80'
           CidrIp: 0.0.0.0/0
   
+  ServiceSG:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: [ ALBSecurityGroup ]
+    Properties:
+      GroupName:  !Join ['-', [!Ref prefix, 'service-sg']]
+      GroupDescription: Service Security Group to allow Load Balancer Access
+      VpcId: !Ref vpcId
+      SecurityGroupIngress:
+        - Description: Allow access to the ELB on port 8080
+          IpProtocol: 'tcp'
+          FromPort: '8080'
+          ToPort: '8080'
+          SourceSecurityGroupId: !Ref ALBSecurityGroup 
+    
   ECSALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Scheme: 'internet-facing'
       Name: !Join ['-', [!Ref prefix, 'alb-external' ]]
-      Subnets: 
-        - !Ref elbSubnet1Id
-        - !Ref elbSubnet2Id
+      Subnets: !Ref elbSubnetsId
       SecurityGroups: 
         - !Ref ALBSecurityGroup
   
@@ -131,32 +128,18 @@ Resources:
       ExecutionRoleArn: !Ref ECSTaskDefinitionRole
       ContainerDefinitions:
         - Name: "HelloCloud"
-          Image: !Ref containerImage
+          Image: !Join ['', [!Ref 'AWS::AccountId', '.dkr.ecr.', !Ref 'AWS::Region', '.amazonaws.com/', !Ref repositoryName] ]
           PortMappings:
             - ContainerPort: 8080
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              awslogs-group: !Join ['-', [!Ref prefix, 'logs-containers' ]]
+              awslogs-group: !Join ['-', [!Ref prefix, 'container-logs' ]]
               awslogs-region: !Ref 'AWS::Region'
               awslogs-stream-prefix: 'container'
       Tags:
         - Key: "Name"
-          Value: "HelloCloudTaskDefinition"
-
-  ServiceSG:
-    Type: AWS::EC2::SecurityGroup
-    DependsOn: [ ALBSecurityGroup ]
-    Properties:
-      GroupName:  !Join ['-', [!Ref prefix, 'service-sg']]
-      GroupDescription: Service Security Group to allow Load Balancer Access
-      VpcId: !Ref vpcId
-      SecurityGroupIngress:
-        - Description: Allow access to the ELB on port 8080
-          IpProtocol: tcp
-          FromPort: '8080'
-          ToPort: '8080'
-          SourceSecurityGroupId: !Ref ALBSecurityGroup       
+          Value: "HelloCloudTaskDefinition"      
 
   HelloCloudALBTG:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -172,7 +155,7 @@ Resources:
       Port: 8080
       Protocol: HTTP
       UnhealthyThresholdCount: 5
-      VpcId: !Ref 'vpcId'
+      VpcId: !Ref vpcId
       Tags:
       - Key: Name
         Value: 'alb-tg-hellocloud'
@@ -209,9 +192,7 @@ Resources:
         AwsvpcConfiguration:
           SecurityGroups:
             - !Ref ServiceSG 
-          Subnets:
-            - !Ref containerSubnet1Id
-            - !Ref containerSubnet2Id
+          Subnets: !Ref containerSubnetsId
   
   LambdaECRRole:
     Type: AWS::IAM::Role
@@ -224,6 +205,8 @@ Resources:
             Service: [lambda.amazonaws.com]
           Action: ['sts:AssumeRole']
       Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
       Policies:
       - PolicyName: !Join ['-', [!Ref prefix, 'lambda-ecr-policy']]
         PolicyDocument:
@@ -235,36 +218,44 @@ Resources:
               - 'ecs:RunTask'
               - 'ecs:StartTask'
             Resource:  '*' 
-          - Effect: Allow
-            Action:
-              - 'ec2:CreateNetworkInterface'
-              - 'ec2:DescribeNetworkInterfaces'
-              - 'ec2:DeleteNetworkInterface'
-            Resource:  '*' 
-          - Effect: Allow
-            Action: 
-                - 'logs:CreateLogGroup'
-                - 'logs:CreateLogStream'
-                - 'logs:PutLogEvents'
-                - 'logs:DescribeLogStreams'
-            Resource: 'arn:aws:logs:*:*:*'
-          - Effect: Allow
-            Action: 
-                - 'ssm:DescribeParameters'
-                - 'ssm:GetParameters'
-            Resource:  'arn:aws:ssm:*:*:*'   
 
-  LambdaECR:
+  LambdaECS:
     Type: "AWS::Lambda::Function"
     DependsOn: [ LambdaECRRole, ECSCluster ]
     Properties:
       FunctionName: !Join ['-', [!Ref prefix, 'lambda-ecr']]
       Description: 'Start a new task when the ecr image changes'
-      Handler: "lambda_ecr.lambda_handler"
+      Handler: "index.lambda_handler"
       Role: !GetAtt LambdaECRRole.Arn
       Code:
-        S3Bucket: !Ref lambdaS3Bucket
-        S3Key: !Ref lambdaS3Key
+        ZipFile:
+          !Sub |
+            import boto3
+            import os
+
+            # Enter the region your instances are in. Include only the region without specifying Availability Zone; e.g., 'us-east-1'
+            region = os.environ['AWS_REGION']
+            ecsClusterName = os.environ['ECS_CLUSTER_NAME']
+
+            def lambda_handler(event, context):
+                print 'EVENT: ' + str(event)
+                
+                if event['detail']['result'] == 'SUCCESS':
+                    repositoryName = event['detail']['repository-name']
+                    
+                    print 'CHANGE IMAGE SUCCESSFUL: ' + repositoryName
+                    
+                    ecs = boto3.client('ecs', region_name=region)
+                    response = ecs.list_services( cluster=ecsClusterName )
+                    
+                    print response
+                    
+                    for serviceArn in response['serviceArns']:
+                        serviceName = serviceArn.split('/')[1];
+                        print 'Service Name ' + serviceName
+                        if serviceName.startswith(repositoryName):
+                            print 'Updating Service ' + serviceName + ' in cluster ' + ecsClusterName
+                            ecs.update_service( cluster=ecsClusterName, service=serviceName, forceNewDeployment=True );
       Runtime: "python2.7"
       Timeout: 300
       MemorySize: 128
@@ -272,30 +263,28 @@ Resources:
       VpcConfig:
         SecurityGroupIds: 
           - !Ref ServiceSG
-        SubnetIds: 
-          - !Ref containerSubnet1Id
-          - !Ref containerSubnet2Id
+        SubnetIds: !Ref containerSubnetsId
       Environment:
         Variables:
           ECS_CLUSTER_NAME: !Ref ECSCluster
   
   CloudWatchECRRule:
     Type: "AWS::Events::Rule"
-    DependsOn: [ LambdaECR ]
+    DependsOn: [ LambdaECS ]
     Properties:
       Name: !Join ['-', [!Ref prefix, 'ecr-rule-event']]
       Description: "ECR Rule that is fired when there is an ECR event"
       EventPattern: '{"source": ["aws.ecr"]}'
       Targets: 
         - Id: !Join ['-', [!Ref prefix, 'lambda-ecr-id']]
-          Arn: !GetAtt LambdaECR.Arn
+          Arn: !GetAtt LambdaECS.Arn
   
   LambdaECREventPermission:
     Type: AWS::Lambda::Permission
-    DependsOn: [ LambdaECR, CloudWatchECRRule ]
+    DependsOn: [ LambdaECS, CloudWatchECRRule ]
     Properties: 
       Action: lambda:InvokeFunction
-      FunctionName: !GetAtt LambdaECR.Arn
+      FunctionName: !GetAtt LambdaECS.Arn
       Principal: 'events.amazonaws.com'
       SourceArn: !GetAtt CloudWatchECRRule.Arn
 
@@ -305,8 +294,8 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-alb-dns"
 
-  ServiceName:
-    Description: Service name
-    Value: !GetAtt HelloCloudService.Name
-    Export:
-      Name: !Sub "${AWS::StackName}-service-name"
+  # ServiceName:
+  #   Description: Service name
+  #   Value: !GetAtt HelloCloudService.Name
+  #   Export:
+  #     Name: !Sub "${AWS::StackName}-service-name"

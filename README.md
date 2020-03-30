@@ -46,19 +46,9 @@ This example will build:
   
   - vpcId: The VPC id where all the infraestructure will be built.
   
-  - elbSubnet1Id: A public subnet that will be associated with the Load Balancer.
+  - elbSubnetsId: Subnets associated with the Load Balancer.
   
-  - elbSubnet2Id: Another public subnet that will be associated with the Load Balancer.
-  
-  - containerSubnet1Id: A private subnet that will be associated with the ECS Service
-  
-  - containerSubnet2Id: Another private subnet that will be associated with the ECS Service
-  
-  - containerImage: Image repository, for example, xxxxxxxxxxxx.dkr.ecr.eu-central-1.amazonaws.com/hellocloud
-  
-  - lambdaS3Bucket: S3 Bucket where the lambda function is stored
-  
-  - lambdaS3Key: S3 key to the lambda function
+  - containerSubnetsId: Private Subnets associated with the container
   
   - repositoryName: ECR Repository Name that contains the image
   
@@ -66,6 +56,6 @@ This example will build:
 
 - hellocloud: An Spring Boot project dockerized that will be deployed using AWS Fargate
 
-- lambda-ecr.py: The lambda function that listens ECR events and launch a new task
+- push-image2ecr.sh: A Linux script that creates the docker image of the target jar and push it to ECR (requires two parameters cli profile and ECR repository)
 
-- push-image2ecr.sh: An script that creates the docker image of the target jar and push it to ECR (requires two parameters cli profile and ECR repository)
+- push-image2ecr.bat: A Windows script that creates the docker image of the target jar and push it to ECR (requires two parameters cli profile and ECR repository)
