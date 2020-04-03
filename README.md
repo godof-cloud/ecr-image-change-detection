@@ -4,6 +4,10 @@
 
 This is a fully functional example of how to deploy automatically a new task when a new image is pushed to a repository in AWS ECR.
 
+You can find a full explanation of this example in: [https://godof.cloud/ecr-image-change-detection/](https://godof.cloud/ecr-image-change-detection/)
+
+
+
 This example will build:
 
 - Log Group
